@@ -13,6 +13,7 @@
     "react-dom": "^18.2.0",
     "@reduxjs/toolkit": "^1.9.5",
     "react-redux": "^8.1.2",
+    "@tanstack/react-virtual": "^3.5.0",
     "plotly.js": "^2.26.0",
     "plotly.js-dist-min": "^2.26.0",
     "react-plotly.js": "^2.6.0",

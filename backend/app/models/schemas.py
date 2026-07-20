@@ -39,3 +39,4 @@ class ClusterResponse(BaseModel):
 
 class SampleTextsResponse(BaseModel):
     texts: list[str]
+    count: int  # actual number of texts returned

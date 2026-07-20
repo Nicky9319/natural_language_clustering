@@ -2,6 +2,16 @@ import { useCallback, useState, useRef } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import { setInputText, runClustering, loadSampleTexts } from '../store/clusterSlice'
 import { IconPlus, IconClose, IconBolt, IconSparkles, IconInfo, IconSpinner, IconText, IconChevronDown } from './icons'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
+const SAMPLE_COUNTS = [
+  { value: 100, label: '100 texts' },
+  { value: 1000, label: '1,000 texts' },
+  { value: 5000, label: '5,000 texts' },
+  { value: 10000, label: '10,000 texts' },
+]
+
+const ITEM_HEIGHT = 48  // fixed height per list row (px)
 
 function InputPanel() {
   const dispatch = useDispatch()
@@ -10,13 +20,23 @@ function InputPanel() {
   const [method, setMethod] = useState('hdbscan')
   const [nClusters, setNClusters] = useState('5')
   const [minClusterSize, setMinClusterSize] = useState('5')
+  const [sampleCount, setSampleCount] = useState(100)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const inputRef = useRef(null)
+  const listContainerRef = useRef(null)
 
   const texts = inputText
     .split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0)
+
+  // Virtual scroller — only renders visible rows
+  const virtualizer = useVirtualizer({
+    count: texts.length,
+    getScrollElement: () => listContainerRef.current,
+    estimateSize: () => ITEM_HEIGHT,
+    overscan: 5,
+  })
 
   const handleTextChange = useCallback((e) => {
     dispatch(setInputText(e.target.value))
@@ -58,8 +78,8 @@ function InputPanel() {
   }, [dispatch])
 
   const handleSampleData = useCallback(() => {
-    dispatch(loadSampleTexts())
-  }, [dispatch])
+    dispatch(loadSampleTexts(sampleCount))
+  }, [dispatch, sampleCount])
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -84,6 +104,11 @@ function InputPanel() {
   const isLoading = status === 'loading'
   const canRun = texts.length >= 4
 
+  // Pagination info for virtual list
+  const virtualItems = virtualizer.getVirtualItems()
+  const startIndex = virtualItems.length > 0 ? virtualItems[0].startIndex : 0
+  const endIndex = virtualItems.length > 0 ? virtualItems[virtualItems.length - 1].endIndex : 0
+
   return (
     <div className="flex flex-col h-full">
       <div className="hidden md:block mb-4">
@@ -91,8 +116,8 @@ function InputPanel() {
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {/* Text list view */}
-        <div className="flex-1 overflow-y-auto scrollbar-thin border border-gray-200 rounded-lg bg-white mb-3">
+        {/* Text list view — virtualized */}
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden rounded-lg bg-white mb-3 border border-gray-200">
           {texts.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-400 text-sm px-6 py-12">
               <IconText className="w-10 h-10 text-gray-300 mb-3" />
@@ -102,27 +127,66 @@ function InputPanel() {
               </p>
             </div>
           ) : (
-            <ul role="list">
-              {texts.map((text, index) => (
-                <li key={index} className="list-row group">
-                  <span className="text-xs text-gray-400 mt-0.5 w-6 text-right flex-shrink-0 font-mono tabular-nums">
-                    {index + 1}
+            <>
+              {/* Scrollable virtual list */}
+              <div
+                ref={listContainerRef}
+                className="flex-1 overflow-y-auto scrollbar-thin"
+                style={{ contain: 'strict' }}
+              >
+                <div
+                  style={{
+                    height: virtualizer.getTotalSize(),
+                    width: '100%',
+                    position: 'relative',
+                  }}
+                >
+                  {virtualItems.map((virtualRow) => {
+                    const text = texts[virtualRow.index]
+                    return (
+                      <div
+                        key={virtualRow.key}
+                        className="list-row group absolute left-0 right-0 flex items-center"
+                        style={{
+                          top: virtualRow.start,
+                          height: ITEM_HEIGHT,
+                        }}
+                      >
+                        <span className="text-xs text-gray-400 mt-0.5 w-6 text-right flex-shrink-0 font-mono tabular-nums px-1">
+                          {virtualRow.index + 1}
+                        </span>
+                        <span className="text-sm text-gray-700 flex-1 break-words px-1">
+                          {text}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveText(virtualRow.index)}
+                          className="text-gray-400 hover:text-red-500 active:text-red-600 transition-colors flex-shrink-0 -mr-1 p-1 touch-target md:opacity-0 md:group-hover:opacity-100"
+                          disabled={isLoading}
+                          aria-label={`Remove text ${virtualRow.index + 1}`}
+                        >
+                          <IconClose className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Virtual scroll position indicator */}
+              {texts.length > 0 && (
+                <div className="flex items-center justify-between text-xs text-gray-500 px-3 py-1.5 border-t border-gray-100 bg-gray-50">
+                  <span className="font-semibold text-gray-700 tabular-nums">
+                    {texts.length.toLocaleString()}
                   </span>
-                  <span className="text-sm text-gray-700 flex-1 break-words">
-                    {text}
+                  <span className="text-gray-400">
+                    {texts.length > 30
+                      ? `Showing ${startIndex + 1}–${endIndex + 1} of ${texts.length.toLocaleString()}`
+                      : `${texts.length} ${texts.length === 1 ? 'text' : 'texts'}`}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveText(index)}
-                    className="text-gray-400 hover:text-red-500 active:text-red-600 transition-colors flex-shrink-0 -mr-1 p-1 touch-target md:opacity-0 md:group-hover:opacity-100"
-                    disabled={isLoading}
-                    aria-label={`Remove text ${index + 1}`}
-                  >
-                    <IconClose className="w-4 h-4" />
-                  </button>
-                </li>
-              ))}
-            </ul>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -153,7 +217,7 @@ function InputPanel() {
 
         <div className="flex items-center justify-between text-xs text-gray-500 mb-3 px-1">
           <span>
-            <span className="font-semibold text-gray-700 tabular-nums">{texts.length}</span>{' '}
+            <span className="font-semibold text-gray-700 tabular-nums">{texts.length.toLocaleString()}</span>{' '}
             {texts.length === 1 ? 'text' : 'texts'} added
           </span>
           <button
@@ -291,16 +355,29 @@ function InputPanel() {
           )}
         </button>
 
-        <button
-          type="button"
-          onClick={handleSampleData}
-          className="btn-secondary w-full"
-          disabled={isLoading}
-        >
-          <IconSparkles className="w-4 h-4" />
-          <span>Load Sample Data</span>
-          <span className="text-gray-400 ml-1">(100)</span>
-        </button>
+        {/* Sample data — count selector + load button */}
+        <div className="flex gap-2">
+          <select
+            value={sampleCount}
+            onChange={(e) => setSampleCount(Number(e.target.value))}
+            disabled={isLoading}
+            className="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-700 flex-shrink-0"
+            aria-label="Sample data count"
+          >
+            {SAMPLE_COUNTS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleSampleData}
+            className="btn-secondary flex-1"
+            disabled={isLoading}
+          >
+            <IconSparkles className="w-4 h-4" />
+            <span>Load Sample Data</span>
+          </button>
+        </div>
       </div>
 
       <details className="mt-4 pt-4 border-t border-gray-200 group">

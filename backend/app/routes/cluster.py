@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from app.models.schemas import ClusterRequest, ClusterResponse, ClusterPoint, ClusterInfo, ClusterStats, SampleTextsResponse
 from app.services.embedder import embedder
 from app.services.clusterer import Clusterer
@@ -9,7 +9,9 @@ import concurrent.futures
 import logging
 import time
 from cerebras.cloud.sdk import Cerebras
+from cerebras.cloud.sdk import RateLimitError as CerebrasRateLimitError
 import os
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 # Configure logging
@@ -23,8 +25,8 @@ logger = logging.getLogger("cluster_api")
 def _extract_json_from_text(text: str) -> str | None:
     """Extract JSON object from text by finding {"texts": or last {...} block."""
     import re
-    # Try to find ```json ... ``` code block first
-    json_match = re.search(r'```json\s*(\{[\s\S]*?\})\s*```', text)
+    # Try to find ```json ... ``` code block first (greedy to capture outermost braces)
+    json_match = re.search(r'```json\s*(\{[\s\S]*\})\s*```', text)
     if json_match:
         return json_match.group(1)
     # Try to find {"texts": ...} pattern - look for the opening brace after "texts": or """
@@ -47,20 +49,18 @@ def _extract_json_from_text(text: str) -> str | None:
                     depth -= 1
                     if depth == 0:
                         return text[start:i+1]
-    # Last resort: find last {...} block
-    last_brace = -1
+    # Last resort: find the FIRST { that eventually closes at depth 0.
+    # This captures the outermost JSON object even when inner objects share the same line.
     for i, c in enumerate(text):
         if c == '{':
-            last_brace = i
-    if last_brace >= 0:
-        depth = 0
-        for i in range(last_brace, len(text)):
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    return text[last_brace:i+1]
+            depth = 0
+            for j in range(i, len(text)):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[i:j+1]
     return None
 
 
@@ -166,12 +166,12 @@ async def cluster_texts(request: ClusterRequest):
     logger.info(f"POST /api/cluster - Grouped texts into {n_clusters} clusters ({noise_count} noise points excluded from naming)")
     step_time = log_step(f"Grouped texts into {n_clusters} clusters", step_time)
 
-    # Name clusters using GROQ (if available) - this is fast, runs in-thread
-    logger.info(f"POST /api/cluster - Calling Groq for cluster naming...")
-    step_time = log_step("Starting Groq cluster naming", step_time)
+    # Name clusters using Cerebras (if available) - this is fast, runs in-thread
+    logger.info(f"POST /api/cluster - Calling Cerebras for cluster naming...")
+    step_time = log_step("Starting Cerebras cluster naming", step_time)
     try:
         names = namer.name_clusters(cluster_texts)
-        step_time = log_step(f"Groq naming complete: {names}", step_time)
+        step_time = log_step(f"Cerebras naming complete: {names}", step_time)
     except Exception as e:
         logger.error(f"POST /api/cluster - Naming FAILED: {type(e).__name__}: {e}")
         names = {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
@@ -234,115 +234,135 @@ async def cluster_texts(request: ClusterRequest):
     )
 
 
+CHUNK_SIZE = 100  # texts per Cerebras API call
+
+
+def _is_retryable_error(e: Exception) -> bool:
+    """Return True for transient errors worth retrying."""
+    if isinstance(e, CerebrasRateLimitError):
+        return True
+    # Timeout / connection errors
+    err_name = type(e).__name__
+    err_msg = str(e).lower()
+    if 'timeout' in err_msg or 'timed out' in err_msg:
+        return True
+    if 'connection' in err_msg or 'network' in err_msg:
+        return True
+    return False
+
+
+def _fetch_chunk(client: Cerebras, chunk_idx: int, chunk_size: int) -> list[str]:
+    """Fetch one chunk of sample texts from Cerebras, with retry."""
+    import json
+
+    prompt = f"""Generate EXACTLY {chunk_size} diverse, short text snippets (each 10-20 words) for a text clustering demo.
+These MUST cover various topics like technology, business, health, science, entertainment, sports, politics, education, finance, etc.
+You MUST provide exactly {chunk_size} items in the array, no more and no less.
+
+Return them as a JSON object with a "texts" key containing an array of EXACTLY {chunk_size} strings:
+
+{{"texts": ["Text 1...", "Text 2...", "Text 3...", ...up to "Text {chunk_size}..."]}}
+
+Respond ONLY with valid JSON containing exactly {chunk_size} texts:"""
+
+    response = client.chat.completions.create(
+        model="gpt-oss-120b",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that generates sample text data. Respond ONLY with valid JSON."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.7,
+        max_tokens=8192,
+        timeout=180.0
+    )
+
+    raw_content = response.choices[0].message.content
+    if raw_content is None:
+        reasoning = response.choices[0].message.reasoning
+        if reasoning:
+            raw_content = _extract_json_from_text(reasoning)
+
+    if raw_content is None:
+        raise ValueError("Cerebras returned empty response")
+
+    result_text = raw_content.strip()
+    data = json.loads(result_text)
+    texts = data.get("texts", [])
+    return texts
+
+
 @router.get("/sample", response_model=SampleTextsResponse)
-async def get_sample_texts():
-    """Fetch 100 sample texts from Groq for clustering demo."""
+async def get_sample_texts(
+    count: int = Query(default=100, ge=1, le=10000, description="Number of sample texts to generate (1-10000)")
+):
+    """Generate up to 10,000 diverse sample texts using Cerebras API, with batching and retry."""
     start_time = time.time()
-    logger.info("GET /api/sample - Fetching sample texts from Groq")
+    logger.info(f"GET /api/sample - count={count}")
 
     api_key = os.getenv("CEREBRAS_API_KEY")
     if not api_key:
         logger.warning("GET /api/sample - CEREBRAS_API_KEY not set")
         raise HTTPException(status_code=500, detail="CEREBRAS_API_KEY not configured")
 
-    try:
-        cerebras_client = Cerebras(api_key=api_key)
+    cerebras_client = Cerebras(api_key=api_key)
 
-        prompt = """Generate EXACTLY 100 diverse, short text snippets (each 10-20 words) for a text clustering demo.
-These MUST cover various topics like technology, business, health, science, entertainment, sports, politics, education, finance, etc.
-You MUST provide exactly 100 items in the array, no more and no less.
+    num_chunks = (count + CHUNK_SIZE - 1) // CHUNK_SIZE
+    all_texts: list[str] = []
+    failed_chunks: list[int] = []
 
-Return them as a JSON object with a "texts" key containing an array of EXACTLY 100 strings:
+    for chunk_idx in range(num_chunks):
+        chunk_start = time.time()
+        texts_in_chunk = min(CHUNK_SIZE, count - len(all_texts))
 
-{"texts": ["Text 1...", "Text 2...", "Text 3...", ...up to "Text 100..."]}
-
-Respond ONLY with valid JSON containing exactly 100 texts:"""
-
-        logger.info("GET /api/sample - Calling Cerebras API...")
         try:
-            response = cerebras_client.chat.completions.create(
-                model="gpt-oss-120b",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant that generates sample text data. Respond ONLY with valid JSON."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=8192,
-                timeout=180.0  # 180 second timeout for Cerebras API
+            @retry(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=2, min=2, max=30),
+                retry=retry_if_exception_type(Exception),
+                reraise=True,
+                before_sleep=lambda retry_state: logger.warning(
+                    f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} retry {retry_state.attempt_number}/3 "
+                    f"after error: {type(retry_state.outcome.exception()).__name__}: {retry_state.outcome.exception()}"
+                )
             )
-            logger.info(f"GET /api/sample - Cerebras API response received, status OK")
+            def fetch_with_retry():
+                return _fetch_chunk(cerebras_client, chunk_idx, texts_in_chunk)
+
+            chunk_texts = fetch_with_retry()
+            all_texts.extend(chunk_texts)
+            chunk_elapsed = time.time() - chunk_start
+            logger.info(
+                f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} OK "
+                f"(+{len(chunk_texts)} texts, {chunk_elapsed:.1f}s, total so far: {len(all_texts)})"
+            )
+
         except Exception as e:
-            logger.error(f"GET /api/sample - Cerebras API error: {type(e).__name__} - {e}")
-            raise HTTPException(status_code=500, detail=f"Cerebras API failed: {type(e).__name__}: {str(e)}")
+            if not _is_retryable_error(e):
+                # Non-retryable error (e.g., JSON parse, validation) — fail immediately
+                logger.error(f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} non-retryable error: {type(e).__name__}: {e}")
+                raise HTTPException(status_code=500, detail=f"Cerebras API error: {type(e).__name__}: {str(e)}")
+            # Retry exhausted — record failure
+            logger.error(f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} failed after 3 retries: {type(e).__name__}: {e}")
+            failed_chunks.append(chunk_idx + 1)
 
-        # Handle Cerebras response - content might be None or in reasoning field
-        raw_content = response.choices[0].message.content
-        # Cerebras reasoning models put content in 'reasoning' field when content is None
-        if raw_content is None:
-            reasoning = response.choices[0].message.reasoning
-            logger.info(f"GET /api/sample - Using reasoning field content ({len(reasoning) if reasoning else 0} chars)")
-            if reasoning:
-                raw_content = _extract_json_from_text(reasoning)
-                logger.info(f"GET /api/sample - Extracted JSON: {len(raw_content) if raw_content else 0} chars")
+        # Early exit if we already have enough texts
+        if len(all_texts) >= count:
+            break
 
-        if raw_content is None:
-            logger.error(f"GET /api/sample - Cerebras returned None content. Full response: {response}")
-            raise HTTPException(status_code=500, detail="Cerebras API returned empty response")
+    if failed_chunks:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate texts for chunks {failed_chunks} after retries. Try again or reduce count."
+        )
 
-        result_text = raw_content.strip()
-        logger.info(f"GET /api/sample - Received response from Cerebras, parsing JSON...")
+    result_texts = all_texts[:count]
+    elapsed = time.time() - start_time
+    logger.info(f"GET /api/sample - Returning {len(result_texts)} texts in {elapsed:.1f}s via {num_chunks} chunks")
 
-        import json
-        try:
-            data = json.loads(result_text)
-            texts = data.get("texts", [])
-
-            if len(texts) < 100:
-                logger.warning(f"GET /api/sample - Only received {len(texts)} texts, padding to 100...")
-                # Pad with diverse meaningful texts if needed
-                padding_templates = [
-                    "Machine learning algorithms are transforming industries worldwide",
-                    "Climate change affects ecosystems across every continent",
-                    "Healthcare innovation leads to better patient outcomes",
-                    "Space exploration opens new frontiers for humanity",
-                    "Education technology reaches remote learners everywhere",
-                    "Renewable energy powers sustainable development",
-                    "Financial markets respond to global economic trends",
-                    "Sports analytics revolutionize team performance strategies",
-                    "Music streaming connects artists with global audiences",
-                    "Social media shapes modern communication patterns",
-                    "Artificial intelligence assists in scientific discoveries",
-                    "Urban planning creates smarter cities for tomorrow",
-                    "Food security addresses challenges in agriculture",
-                    "Cybersecurity protects critical digital infrastructure",
-                    "Transportation advances improve logistics efficiency",
-                    "Entertainment content engages diverse audiences globally",
-                    "Fashion industry adapts to changing consumer preferences",
-                    "Environmental conservation efforts gain momentum everywhere",
-                    "Scientific research unlocks new possibilities for future",
-                    "Digital transformation reshapes business operations"
-                ]
-                idx = 0
-                while len(texts) < 100:
-                    texts.append(f"{padding_templates[idx % len(padding_templates)]} ({len(texts) + 1})")
-                    idx += 1
-
-            elapsed = time.time() - start_time
-            logger.info(f"GET /api/sample - Returning {len(texts)} sample texts in {elapsed:.2f}s")
-
-            return SampleTextsResponse(texts=texts[:100])
-
-        except json.JSONDecodeError as e:
-            logger.error(f"GET /api/sample - JSON parse error: {e}")
-            logger.error(f"GET /api/sample - Failed text was: {result_text[:500] if result_text else '(empty)'}")
-            raise HTTPException(status_code=500, detail=f"Failed to parse Cerebras response: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"GET /api/sample - Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch sample texts: {str(e)}")
+    return SampleTextsResponse(texts=result_texts, count=len(result_texts))

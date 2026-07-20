@@ -11,8 +11,8 @@ logger = logging.getLogger("cluster_namer")
 
 def _extract_json_from_text(text: str) -> str | None:
     """Extract JSON object from text by finding {"texts": or last {...} block."""
-    # Try to find ```json ... ``` code block first
-    json_match = re.search(r'```json\s*(\{[\s\S]*?\})\s*```', text)
+    # Try to find ```json ... ``` code block first (greedy to capture outermost braces)
+    json_match = re.search(r'```json\s*(\{[\s\S]*\})\s*```', text)
     if json_match:
         return json_match.group(1)
     # Try to find {"texts": ...} pattern
@@ -34,20 +34,18 @@ def _extract_json_from_text(text: str) -> str | None:
                     depth -= 1
                     if depth == 0:
                         return text[start:i+1]
-    # Last resort: find last {...} block
-    last_brace = -1
+    # Last resort: find the FIRST { that eventually closes at depth 0.
+    # This captures the outermost JSON object even when inner objects share the same line.
     for i, c in enumerate(text):
         if c == '{':
-            last_brace = i
-    if last_brace >= 0:
-        depth = 0
-        for i in range(last_brace, len(text)):
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    return text[last_brace:i+1]
+            depth = 0
+            for j in range(i, len(text)):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[i:j+1]
     return None
 
 

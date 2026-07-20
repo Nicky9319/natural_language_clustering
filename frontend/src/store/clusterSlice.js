@@ -25,9 +25,9 @@ export const runClustering = createAsyncThunk(
 
 export const loadSampleTexts = createAsyncThunk(
   'cluster/loadSampleTexts',
-  async (_, { rejectWithValue }) => {
+  async (count = 100, { rejectWithValue }) => {
     try {
-      const response = await clusterApi.getSampleTexts()
+      const response = await clusterApi.getSampleTexts(count)
       return response.texts
     } catch (error) {
       return rejectWithValue(

@@ -16,8 +16,8 @@ export const clusterApi = {
     return response.data
   },
 
-  getSampleTexts: async () => {
-    const response = await axios.get(`${API_URL.replace('/cluster', '/sample')}`)
+  getSampleTexts: async (count = 100) => {
+    const response = await axios.get(`${API_URL.replace('/cluster', '/sample')}?count=${count}`)
     return response.data
   }
 }

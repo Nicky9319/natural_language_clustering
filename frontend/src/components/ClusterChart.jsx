@@ -20,6 +20,11 @@ function ClusterChart() {
   }, [])
 
   const plotData = useMemo(() => {
+    // Dynamic marker sizing based on total point count
+    const totalPoints = points.length
+    const markerSize = totalPoints >= 5000 ? 3 : totalPoints >= 1000 ? 4 : isMobile ? 10 : 8
+    const markerOpacity = totalPoints >= 5000 ? 0.6 : totalPoints >= 1000 ? 0.7 : 0.8
+
     const traces = clusters.map(cluster => {
       const clusterPoints = points.filter(p => p.cluster === cluster.id)
       return {
@@ -33,8 +38,8 @@ function ClusterChart() {
         name: `${cluster.name} (${cluster.size})`,
         marker: {
           color: cluster.color,
-          size: isMobile ? 10 : 8,
-          opacity: 0.8,
+          size: markerSize,
+          opacity: markerOpacity,
           line: {
             color: selectedCluster === cluster.id ? '#1f2937' : 'transparent',
             width: selectedCluster === cluster.id ? 2 : 0
