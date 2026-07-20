@@ -41,7 +41,7 @@ function ClusterChart() {
           }
         },
         hovertemplate: `<b>%{text}</b><br>` +
-          `Cluster: ${cluster.name}<br>` +
+          `Cluster: ${cluster.name}${cluster.description ? `<br>${cluster.description}` : ''}<br>` +
           `Confidence: %{customdata:.2f}<br>` +
           `<extra></extra>`,
         customdata: clusterPoints.map(p => p.confidence)

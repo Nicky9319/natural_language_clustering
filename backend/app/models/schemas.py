@@ -20,6 +20,7 @@ class ClusterPoint(BaseModel):
 class ClusterInfo(BaseModel):
     id: str
     name: str
+    description: Optional[str] = None
     size: int
     color: str
 

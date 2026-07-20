@@ -41,7 +41,9 @@ function InputPanel() {
       alert('Please enter at least 2 text lines to cluster.')
       return
     }
-    const clusterCount = Math.max(2, parseInt(nClusters, 10) || 2)
+    const parsed = parseInt(nClusters, 10)
+    // 0, 1, or empty → auto-detect (send null), otherwise use the value
+    const clusterCount = (parsed === 0 || parsed === 1 || isNaN(parsed)) ? null : Math.min(20, Math.max(2, parsed))
     const smallestClusterSize = Math.max(2, parseInt(minClusterSize, 10) || 2)
     const options = {
       method,
@@ -67,7 +69,12 @@ function InputPanel() {
   }, [handleAddText])
 
   const handleClusterCountBlur = useCallback(() => {
-    setNClusters(String(Math.max(2, parseInt(nClusters, 10) || 2)))
+    // Keep 0 and 1 as-is (they mean auto-detect), otherwise clamp to 2-20
+    const parsed = parseInt(nClusters, 10)
+    if (parsed === 0 || parsed === 1 || isNaN(parsed)) {
+      return // leave as-is
+    }
+    setNClusters(String(Math.min(20, Math.max(2, parsed))))
   }, [nClusters])
 
   const handleSmallestClusterSizeBlur = useCallback(() => {
@@ -212,8 +219,8 @@ function InputPanel() {
               <p className="mt-1.5 text-xs text-gray-500 flex items-start gap-1">
                 <IconInfo className="w-3 h-3 flex-shrink-0 mt-0.5" />
                 {method === 'hdbscan'
-                  ? 'The app estimates a suitable number of clusters from the texts you provide.'
-                  : 'Set the exact number of clusters you want the app to create.'}
+                  ? 'Automatically estimates a suitable number of clusters.'
+                  : 'Set 0 or 1 to auto-detect, or 2-20 to specify exact count.'}
               </p>
             </div>
 
@@ -226,14 +233,15 @@ function InputPanel() {
                 <input
                   id="n-clusters"
                   type="number"
-                  min={2}
+                  min={0}
                   max={20}
                   value={nClusters}
                   onChange={(e) => setNClusters(e.target.value)}
                   onBlur={handleClusterCountBlur}
+                  placeholder="0 = auto"
                   className="w-24 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
                 />
-                <span className="ml-2 text-xs text-gray-500">clusters (2-20)</span>
+                <span className="ml-2 text-xs text-gray-500">0 or 1 = auto-detect, 2-20 = exact</span>
               </div>
             )}
 

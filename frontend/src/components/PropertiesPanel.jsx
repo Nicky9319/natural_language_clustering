@@ -98,6 +98,13 @@ function SelectedClusterCard({ cluster, topItems }) {
           {cluster.name}
         </h3>
       </div>
+
+      {cluster.description && (
+        <p className="text-xs text-gray-600 mb-3 leading-relaxed bg-white border border-gray-100 rounded p-2">
+          {cluster.description}
+        </p>
+      )}
+
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>
           <p className="text-gray-500 uppercase tracking-wider text-[10px] font-semibold mb-0.5">Size</p>

@@ -47,7 +47,7 @@ This application performs semantic text clustering by:
 1. **Embedding**: Converting text into dense vector representations using the BGE-m3 transformer model
 2. **Clustering**: Grouping similar texts using either K-Means or HDBSCAN algorithms
 3. **Visualization**: Projecting high-dimensional vectors to 2D using UMAP for interactive visualization
-4. **Naming**: Auto-generating descriptive cluster names using Groq AI
+4. **Naming**: Auto-generating descriptive cluster names using Cerebras AI
 
 ---
 
@@ -75,7 +75,7 @@ graph TB
 
         I -->|BGE-m3| L[1024-dim Vectors]
         J -->|K-Means or HDBSCAN| M[Cluster Labels]
-        K -->|Groq AI| N[Cluster Names]
+        K -->|Cerebras AI| N[Cluster Names]
     end
 
     style Frontend fill:#1f3a5f,stroke:#58a6ff,color:#e6edf3
@@ -126,7 +126,7 @@ flowchart LR
 | **scikit-learn** | 1.4.0 | K-Means clustering, silhouette scoring |
 | **UMAP** | 0.5.5 | Dimensionality reduction |
 | **HDBSCAN** | 0.8.1 | Density-based clustering |
-| **Groq SDK** | 0.4.2 | AI-powered cluster naming |
+| **Cerebras SDK** | Latest | AI-powered cluster naming |
 | **NumPy** | 1.26.3 | Numerical computations |
 | **Pandas** | 2.2.0 | Data manipulation |
 
@@ -257,24 +257,24 @@ flowchart LR
     style Config fill:#2d333b,stroke:#8b949e,color:#e6edf3
 ```
 
-### 5. Cluster Naming (Groq AI)
+### 5. Cluster Naming (Cerebras AI)
 
-**Model**: `llama-3.3-70b-versatile` via Groq API
+**Model**: `gpt-oss-120b` via Cerebras API
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'lineColor': '#8b949e', 'tertiaryColor': '#d29922', 'noteBkgColor': '#2d333b', 'noteTextColor': '#e6edf3' }} }%%
 sequenceDiagram
     participant BE as Backend
-    participant Groq as Groq API
+    participant Cerebras as Cerebras API
 
     BE->>BE: Sample up to 5 texts<br/>per cluster (100 chars each)
-    BE->>Groq: POST /chat/completions
-    Note over Groq: Prompt: "You are a data analyst...<br/>Samples: text1, text2..."
-    Groq-->>BE: Response with<br/>cluster name
+    BE->>Cerebras: POST /chat/completions
+    Note over Cerebras: Prompt: "You are a data analyst...<br/>Samples: text1, text2..."
+    Cerebras-->>BE: Response with<br/>cluster name
     BE->>BE: Extract name from<br/>response
-    alt Groq Available
+    alt Cerebras Available
         BE->>BE: Use AI-generated name
-    else Groq Unavailable
+    else Cerebras Unavailable
         BE->>BE: Fallback to "Cluster 1, 2, 3..."
     end
 ```
@@ -292,7 +292,7 @@ natural_language_clustering/
 ├── backend/
 │   ├── Dockerfile              # Backend container definition
 │   ├── requirements.txt        # Python dependencies
-│   ├── .env                   # Environment variables (GROQ_API_KEY)
+│   ├── .env                   # Environment variables (CEREBRAS_API_KEY)
 │   └── app/
 │       ├── main.py            # FastAPI app initialization
 │       ├── models/
@@ -302,7 +302,7 @@ natural_language_clustering/
 │       └── services/
 │           ├── embedder.py     # BGE-m3 embedding service
 │           ├── clusterer.py    # K-Means/HDBSCAN + UMAP
-│           └── namer.py        # Groq AI cluster naming
+│           └── namer.py        # Cerebras AI cluster naming
 │
 └── frontend/
     ├── Dockerfile             # Frontend container definition
@@ -368,7 +368,7 @@ graph LR
 | Image | Built from `./backend` | Custom Dockerfile |
 | Container Name | `backend` | Docker container name |
 | Port | `5000:5000` | Host:Container port mapping |
-| Environment File | `./backend/.env` | GROQ_API_KEY |
+| Environment File | `./backend/.env` | CEREBRAS_API_KEY |
 | Volume | `backend-huggingface-cache:/root/.cache/huggingface` | Model cache persistence |
 | Health Check | `GET /health` | Container health verification |
 | Dependencies | None | Starts independently |
@@ -397,7 +397,7 @@ graph LR
 
 ```bash
 # Required
-GROQ_API_KEY=gsk_your_api_key_here
+CEREBRAS_API_KEY=your_cerebras_api_key_here
 
 # Optional
 PRELOAD_EMBEDDING_MODEL=false  # Set to true to load model at container start
@@ -417,7 +417,7 @@ VITE_API_URL=http://backend:5000  # Internal Docker network URL
 
 1. **Docker** installed (version 20.10+)
 2. **Docker Compose** installed (version 2.0+)
-3. **GROQ API Key** from [console.groq.com](https://console.groq.com)
+3. **Cerebras API Key** from [console.cerebras.ai](https://console.cerebras.ai)
 
 ### Quick Start
 
@@ -432,7 +432,7 @@ cd /home/paarth/workspace/natural-language-classification/natural_language_clust
 Edit `backend/.env`:
 
 ```bash
-GROQ_API_KEY=your_actual_groq_api_key_here
+CEREBRAS_API_KEY=your_actual_cerebras_api_key_here
 ```
 
 **Step 3: Build and start containers**
@@ -550,7 +550,7 @@ PRELOAD_EMBEDDING_MODEL=false
 ```bash
 cd backend
 pip install -r requirements.txt
-export GROQ_API_KEY=your_api_key
+export CEREBRAS_API_KEY=your_api_key
 uvicorn app.main:app --reload --port 5000
 ```
 
@@ -679,7 +679,7 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "groq_available": true
+  "cerebras_available": true
 }
 ```
 
@@ -691,7 +691,7 @@ Health check endpoint.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GROQ_API_KEY` | Yes | - | API key from console.groq.com |
+| `CEREBRAS_API_KEY` | Yes | - | API key from console.cerebras.ai |
 | `PRELOAD_EMBEDDING_MODEL` | No | `false` | Load model at startup |
 
 ### Frontend (docker-compose.yml)

@@ -19,7 +19,7 @@ load_dotenv()
 logger.info("=" * 60)
 logger.info("Starting Natural Language Clustering API...")
 logger.info("=" * 60)
-logger.info(f"GROQ_API_KEY configured: {os.getenv('GROQ_API_KEY') is not None}")
+logger.info(f"CEREBRAS_API_KEY configured: {os.getenv('CEREBRAS_API_KEY') is not None}")
 
 # Keep startup responsive by default. The embedding model is loaded on the first
 # clustering request unless PRELOAD_EMBEDDING_MODEL=true is set.
@@ -56,4 +56,4 @@ app.include_router(cluster_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "groq_available": os.getenv("GROQ_API_KEY") is not None}
+    return {"status": "healthy", "cerebras_available": os.getenv("CEREBRAS_API_KEY") is not None}

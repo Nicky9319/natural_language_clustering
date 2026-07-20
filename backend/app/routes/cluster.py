@@ -8,7 +8,7 @@ import asyncio
 import concurrent.futures
 import logging
 import time
-import groq
+from cerebras.cloud.sdk import Cerebras
 import os
 
 
@@ -18,6 +18,50 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("cluster_api")
+
+
+def _extract_json_from_text(text: str) -> str | None:
+    """Extract JSON object from text by finding {"texts": or last {...} block."""
+    import re
+    # Try to find ```json ... ``` code block first
+    json_match = re.search(r'```json\s*(\{[\s\S]*?\})\s*```', text)
+    if json_match:
+        return json_match.group(1)
+    # Try to find {"texts": ...} pattern - look for the opening brace after "texts": or """
+    texts_marker = re.search(r'["\']texts["\']\s*:\s*\[', text)
+    if texts_marker:
+        # Find the opening { before "texts"
+        search_start = max(0, texts_marker.start() - 200)
+        search_region = text[search_start:texts_marker.end()]
+        brace_pos = -1
+        for i, c in enumerate(search_region):
+            if c == '{':
+                brace_pos = i
+        if brace_pos >= 0:
+            start = search_start + brace_pos
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+    # Last resort: find last {...} block
+    last_brace = -1
+    for i, c in enumerate(text):
+        if c == '{':
+            last_brace = i
+    if last_brace >= 0:
+        depth = 0
+        for i in range(last_brace, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[last_brace:i+1]
+    return None
 
 
 router = APIRouter(prefix="/api", tags=["cluster"])
@@ -130,16 +174,18 @@ async def cluster_texts(request: ClusterRequest):
         step_time = log_step(f"Groq naming complete: {names}", step_time)
     except Exception as e:
         logger.error(f"POST /api/cluster - Naming FAILED: {type(e).__name__}: {e}")
-        names = {i: f"Cluster {i+1}" for i in cluster_texts.keys()}
+        names = {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
         step_time = log_step("Using fallback cluster names due to naming error", step_time)
 
     # Build response
     clusters = []
     cluster_idx = 0
     for label in sorted(cluster_texts.keys()):
+        name_info = names.get(label, {"name": f"Cluster {cluster_idx+1}", "description": None})
         clusters.append(ClusterInfo(
             id=str(label),
-            name=names.get(label, f"Cluster {cluster_idx+1}"),
+            name=name_info.get("name", f"Cluster {cluster_idx+1}"),
+            description=name_info.get("description"),
             size=cluster_sizes[label],
             color=CLUSTER_COLORS[cluster_idx % len(CLUSTER_COLORS)]
         ))
@@ -150,6 +196,7 @@ async def cluster_texts(request: ClusterRequest):
         clusters.append(ClusterInfo(
             id="unclustered",
             name="Unclustered",
+            description="Points that could not be assigned to any cluster",
             size=noise_count,
             color="#e5e7eb"  # Gray for noise
         ))
@@ -193,13 +240,13 @@ async def get_sample_texts():
     start_time = time.time()
     logger.info("GET /api/sample - Fetching sample texts from Groq")
 
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("CEREBRAS_API_KEY")
     if not api_key:
-        logger.warning("GET /api/sample - GROQ_API_KEY not set")
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+        logger.warning("GET /api/sample - CEREBRAS_API_KEY not set")
+        raise HTTPException(status_code=500, detail="CEREBRAS_API_KEY not configured")
 
     try:
-        groq_client = groq.Groq(api_key=api_key)
+        cerebras_client = Cerebras(api_key=api_key)
 
         prompt = """Generate EXACTLY 100 diverse, short text snippets (each 10-20 words) for a text clustering demo.
 These MUST cover various topics like technology, business, health, science, entertainment, sports, politics, education, finance, etc.
@@ -211,10 +258,10 @@ Return them as a JSON object with a "texts" key containing an array of EXACTLY 1
 
 Respond ONLY with valid JSON containing exactly 100 texts:"""
 
-        logger.info("GET /api/sample - Calling Groq API...")
+        logger.info("GET /api/sample - Calling Cerebras API...")
         try:
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+            response = cerebras_client.chat.completions.create(
+                model="gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -227,24 +274,29 @@ Respond ONLY with valid JSON containing exactly 100 texts:"""
                 ],
                 temperature=0.7,
                 max_tokens=8192,
-                timeout=120.0  # 120 second timeout for Groq API
+                timeout=180.0  # 180 second timeout for Cerebras API
             )
-            logger.info(f"GET /api/sample - Groq API response received, status OK")
-        except groq.RateLimitError as e:
-            logger.error(f"GET /api/sample - Groq API rate limit exceeded: {e}")
-            raise HTTPException(status_code=429, detail=f"Groq API rate limit exceeded - please wait a moment and try again: {str(e)}")
-        except groq.APITimeoutError as e:
-            logger.error(f"GET /api/sample - Groq API timeout: {e}")
-            raise HTTPException(status_code=504, detail=f"Groq API timeout - please try again: {str(e)}")
-        except groq.APIStatusError as e:
-            logger.error(f"GET /api/sample - Groq API status error: {e.status_code} - {e.response}")
-            raise HTTPException(status_code=e.status_code, detail=f"Groq API error ({e.status_code}): {str(e)}")
+            logger.info(f"GET /api/sample - Cerebras API response received, status OK")
         except Exception as e:
-            logger.error(f"GET /api/sample - Unexpected Groq API error: {type(e).__name__} - {e}")
-            raise HTTPException(status_code=500, detail=f"Groq API failed: {type(e).__name__}: {str(e)}")
+            logger.error(f"GET /api/sample - Cerebras API error: {type(e).__name__} - {e}")
+            raise HTTPException(status_code=500, detail=f"Cerebras API failed: {type(e).__name__}: {str(e)}")
 
-        result_text = response.choices[0].message.content.strip()
-        logger.info(f"GET /api/sample - Received response from Groq, parsing JSON...")
+        # Handle Cerebras response - content might be None or in reasoning field
+        raw_content = response.choices[0].message.content
+        # Cerebras reasoning models put content in 'reasoning' field when content is None
+        if raw_content is None:
+            reasoning = response.choices[0].message.reasoning
+            logger.info(f"GET /api/sample - Using reasoning field content ({len(reasoning) if reasoning else 0} chars)")
+            if reasoning:
+                raw_content = _extract_json_from_text(reasoning)
+                logger.info(f"GET /api/sample - Extracted JSON: {len(raw_content) if raw_content else 0} chars")
+
+        if raw_content is None:
+            logger.error(f"GET /api/sample - Cerebras returned None content. Full response: {response}")
+            raise HTTPException(status_code=500, detail="Cerebras API returned empty response")
+
+        result_text = raw_content.strip()
+        logger.info(f"GET /api/sample - Received response from Cerebras, parsing JSON...")
 
         import json
         try:
@@ -288,7 +340,8 @@ Respond ONLY with valid JSON containing exactly 100 texts:"""
 
         except json.JSONDecodeError as e:
             logger.error(f"GET /api/sample - JSON parse error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to parse Groq response: {str(e)}")
+            logger.error(f"GET /api/sample - Failed text was: {result_text[:500] if result_text else '(empty)'}")
+            raise HTTPException(status_code=500, detail=f"Failed to parse Cerebras response: {str(e)}")
 
     except Exception as e:
         logger.error(f"GET /api/sample - Error: {str(e)}")
