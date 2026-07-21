@@ -139,7 +139,7 @@ function ChartPanel() {
   const { status } = useSelector((state) => state.cluster)
 
   return (
-    <div className="card p-3 sm:p-4 flex-1 flex flex-col overflow-hidden min-h-0">
+    <div className="card p-3 sm:p-4 flex flex-col h-full overflow-hidden">
       <div className="hidden md:flex items-center justify-between mb-3">
         <h2 className="panel-header">Cluster Visualization</h2>
       </div>
@@ -159,11 +159,6 @@ function App() {
     const text = state.cluster.inputText || ''
     return text.split('\n').map(l => l.trim()).filter(l => l.length).length
   })
-
-  // Auto-switch to chart tab when results arrive (so users see the result on mobile)
-  if (stats && activeTab === 'input' && textsCount > 0) {
-    // Don't force switch — user may want to keep editing. Just leave it.
-  }
 
   return (
     <div className="min-h-screen-mobile bg-gray-50">
@@ -193,28 +188,33 @@ function App() {
         )}
       </main>
 
-      {/* Tablet: 2-column (input | chart) with insights as overlay/sheet on demand */}
+      {/* Tablet: 2-column (input | chart) */}
       <main className="hidden md:block lg:hidden p-4 sm:p-6 h-screen-mobile overflow-hidden">
-        <div className="grid grid-cols-12 gap-4 sm:gap-6 h-full pb-4">
-          <div className="col-span-4 card p-4 overflow-hidden flex flex-col min-h-0">
+        <div className="flex gap-4 sm:gap-6 h-full pb-4">
+          <div className="w-72 flex-shrink-0 card overflow-hidden flex flex-col">
             <InputPanel />
           </div>
-          <div className="col-span-8 flex flex-col min-h-0">
+          <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
             <ChartPanel />
           </div>
         </div>
       </main>
 
-      {/* Desktop: 3-column layout */}
+      {/* Desktop: 3-column — fixed-width sidebar + flex chart + fixed properties */}
       <main className="hidden lg:block p-6 h-screen-mobile overflow-hidden">
-        <div className="grid grid-cols-12 gap-6 h-full pb-6">
-          <div className="col-span-3 xl:col-span-3 card p-4 overflow-hidden flex flex-col min-h-0">
+        <div className="flex gap-6 h-full pb-6">
+          {/* Left: fixed-width input panel */}
+          <div className="w-80 flex-shrink-0 card overflow-hidden flex flex-col">
             <InputPanel />
           </div>
-          <div className="col-span-6 xl:col-span-6 flex flex-col min-h-0">
+
+          {/* Center: flex chart area */}
+          <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
             <ChartPanel />
           </div>
-          <div className="col-span-3 xl:col-span-3 card p-4 overflow-hidden flex flex-col min-h-0">
+
+          {/* Right: fixed-width properties panel */}
+          <div className="w-72 flex-shrink-0 card overflow-hidden flex flex-col">
             <PropertiesPanel />
           </div>
         </div>
