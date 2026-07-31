@@ -1,28 +1,5 @@
 # Natural Language Clustering
 
-<!-- Dark mode optimized styles -->
-<style>
-  :root {
-    --dm-bg: #0d1117;
-    --dm-bg-secondary: #161b22;
-    --dm-border: #30363d;
-    --dm-text: #e6edf3;
-    --dm-text-secondary: #8b949e;
-    --dm-accent-blue: #58a6ff;
-    --dm-accent-green: #7ee787;
-    --dm-accent-yellow: #d29922;
-    --dm-accent-red: #f85149;
-  }
-  @media (prefers-color-scheme: dark) {
-    body, body { background-color: var(--dm-bg); color: var(--dm-text); }
-    table { border-color: var(--dm-border); }
-    th, td { border-color: var(--dm-border); background: var(--dm-bg-secondary); color: var(--dm-text); }
-    code, pre { background: var(--dm-bg-secondary); color: var(--dm-text); border-color: var(--dm-border); }
-    a { color: var(--dm-accent-blue); }
-    h1, h2, h3, h4 { color: var(--dm-text); }
-  }
-</style>
-
 An intelligent semantic text clustering and visualization application that groups similar texts together using state-of-the-art embedding models and clustering algorithms, presented through an interactive 2D visualization.
 
 ## Table of Contents
@@ -55,7 +32,7 @@ This application performs semantic text clustering by:
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'primaryTextColor': '#e6edf3', 'lineColor': '#8b949e' }} }%%
-graph TB
+flowchart TB
     subgraph Frontend["Frontend (React) - Port 3000"]
         A[Input Panel] -->|User Input| B[Redux Store]
         C[Cluster Chart] -->|Visualization| B
@@ -65,9 +42,9 @@ graph TB
     B -->|HTTP /api/*| E
 
     subgraph Backend["Backend (FastAPI) - Port 5000"]
-        E[API Routes] --> F[/api/cluster]
-        E --> G[/api/sample]
-        E --> H[/health]
+        E[API Routes] --> F["/api/cluster"]
+        E --> G["/api/sample"]
+        E --> H["/health"]
 
         F --> I[Embedder Service]
         F --> J[Clusterer Service]
@@ -166,7 +143,7 @@ flowchart LR
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'lineColor': '#8b949e' }} }%%
-graph LR
+flowchart LR
     A["Input Text"] --> B["Tokenizer"]
     B --> C["Transformer<br/>BGE-m3"]
     C --> D["1024-dim<br/>Embedding"]
@@ -197,7 +174,7 @@ flowchart TD
     E --> F["Cluster Labels<br/>[N x 1]"]
     F --> G["Cluster Centers<br/>[K x 1024]"]
     G --> H["Calculate<br/>Confidence"]
-    H --> I["1 / 1 + distance"]
+    H --> I["1 / (1 + distance)"]
 
     style C fill:#3d2e1f,stroke:#d29922,color:#e6edf3
     style E fill:#1f4a32,stroke:#7ee787,color:#e6edf3
@@ -337,7 +314,7 @@ natural_language_clustering/
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'lineColor': '#8b949e', 'tertiaryColor': '#d29922' }} }%%
-graph LR
+flowchart LR
     subgraph DockerHost["Docker Host"]
         subgraph BackendContainer["backend container"]
             B[FastAPI<br/>Port 5000] --> C[HuggingFace<br/>Cache Volume]
