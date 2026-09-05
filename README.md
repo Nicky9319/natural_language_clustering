@@ -26,6 +26,18 @@ This application performs semantic text clustering by:
 3. **Visualization**: Projecting high-dimensional vectors to 2D using UMAP for interactive visualization
 4. **Naming**: Auto-generating descriptive cluster names using Cerebras AI
 
+## Use Case
+
+**AI / LLM Evaluation Output Analysis** — When you ask an LLM to evaluate a dataset (customer conversations, survey responses, support tickets, product reviews, or any collection of text), it returns rich qualitative feedback. This tool clusters that feedback to surface patterns, themes, and actionable insights:
+
+- **Understand large volumes of LLM analysis at a glance** — instead of reading hundreds of individual responses, see thematic clusters emerge naturally
+- **Derive numerical insights from qualitative data** — quantify how responses group together (e.g., "40% of LLM responses flagged billing concerns, 25% mentioned shipping delays")
+- **Visualize the data landscape** — see how topics relate spatially through the 2D UMAP projection
+- **Get AI-generated cluster names** — Cerebras automatically names each cluster, saving manual labeling effort
+- **Drive actionable decisions** — identify the largest or most critical cluster and prioritize accordingly
+
+In short, this tool bridges **qualitative LLM outputs** and **quantitative business decisions** — turning unstructured text evaluation into structured, visual insight that teams can act on.
+
 ---
 
 ## Architecture
