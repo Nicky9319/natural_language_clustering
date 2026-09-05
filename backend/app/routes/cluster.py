@@ -8,10 +8,16 @@ import asyncio
 import concurrent.futures
 import logging
 import time
-from cerebras.cloud.sdk import Cerebras
-from cerebras.cloud.sdk import RateLimitError as CerebrasRateLimitError
 import os
+import json
+import re
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
 
 
 # Configure logging
@@ -234,27 +240,34 @@ async def cluster_texts(request: ClusterRequest):
     )
 
 
-CHUNK_SIZE = 100  # texts per Cerebras API call
+CHUNK_SIZE = 100  # texts per LLM API call
+
+
+def _load_config() -> dict:
+    """Load config from config.json if present."""
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
 
 def _is_retryable_error(e: Exception) -> bool:
     """Return True for transient errors worth retrying."""
-    if isinstance(e, CerebrasRateLimitError):
-        return True
-    # Timeout / connection errors
     err_name = type(e).__name__
     err_msg = str(e).lower()
     if 'timeout' in err_msg or 'timed out' in err_msg:
         return True
-    if 'connection' in err_msg or 'network' in err_msg:
+    if 'connection' in err_msg or 'network' in err_msg or '503' in err_msg:
         return True
     return False
 
 
-def _fetch_chunk(client: Cerebras, chunk_idx: int, chunk_size: int) -> list[str]:
-    """Fetch one chunk of sample texts from Cerebras, with retry."""
-    import json
-
+def _fetch_chunk_google(client, model_name: str, chunk_size: int) -> list[str]:
+    """Fetch one chunk of sample texts from Google AI, with retry."""
     prompt = f"""Generate EXACTLY {chunk_size} diverse, short text snippets (each 10-20 words) for a text clustering demo.
 These MUST cover various topics like technology, business, health, science, entertainment, sports, politics, education, finance, etc.
 You MUST provide exactly {chunk_size} items in the array, no more and no less.
@@ -265,34 +278,46 @@ Return them as a JSON object with a "texts" key containing an array of EXACTLY {
 
 Respond ONLY with valid JSON containing exactly {chunk_size} texts:"""
 
-    response = client.chat.completions.create(
-        model="gpt-oss-120b",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful assistant that generates sample text data. Respond ONLY with valid JSON."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.7,
-        max_tokens=8192,
-        timeout=180.0
+    response = client.generate_content(
+        prompt,
+        generation_config={
+            "temperature": 0.7,
+            "max_output_tokens": 8192,
+        }
     )
 
-    raw_content = response.choices[0].message.content
-    if raw_content is None:
-        reasoning = response.choices[0].message.reasoning
-        if reasoning:
-            raw_content = _extract_json_from_text(reasoning)
+    # Extract text from candidates first (more reliable than .text property)
+    result_text = ""
+    if response.candidates:
+        for candidate in response.candidates:
+            if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        result_text += part.text
+                        break  # take first part with text
 
-    if raw_content is None:
-        raise ValueError("Cerebras returned empty response")
+    # Fallback to .text if candidates gave nothing
+    if not result_text:
+        result_text = getattr(response, 'text', "") or ""
 
-    result_text = raw_content.strip()
-    data = json.loads(result_text)
+    logger.info(f"[SAMPLE] Response text (first 300 chars): {result_text[:300] if result_text else '<empty>'}")
+
+    if not result_text or not result_text.strip():
+        pf = getattr(response, 'prompt_feedback', None)
+        raise ValueError(f"Google AI returned empty response. Prompt feedback: {pf}")
+
+    # Strip markdown code fences if present
+    result_text = result_text.strip()
+    if result_text.startswith("```"):
+        # Remove ```json ... ``` or ``` ... ```
+        result_text = re.sub(r'^```(\w*)\s*', '', result_text)
+        result_text = re.sub(r'\s*```$', '', result_text)
+
+    try:
+        data = json.loads(result_text.strip())
+    except json.JSONDecodeError as e:
+        logger.error(f"[SAMPLE] JSON parse error at pos {e.pos}: '{e.msg}', doc snippet: {repr(result_text[:200])}")
+        raise
     texts = data.get("texts", [])
     return texts
 
@@ -301,16 +326,40 @@ Respond ONLY with valid JSON containing exactly {chunk_size} texts:"""
 async def get_sample_texts(
     count: int = Query(default=100, ge=1, le=10000, description="Number of sample texts to generate (1-10000)")
 ):
-    """Generate up to 10,000 diverse sample texts using Cerebras API, with batching and retry."""
+    """Generate up to 10,000 diverse sample texts using LLM API, with batching and retry."""
     start_time = time.time()
     logger.info(f"GET /api/sample - count={count}")
 
-    api_key = os.getenv("CEREBRAS_API_KEY")
-    if not api_key:
-        logger.warning("GET /api/sample - CEREBRAS_API_KEY not set")
-        raise HTTPException(status_code=500, detail="CEREBRAS_API_KEY not configured")
+    # Load config for model name
+    config = _load_config()
+    llm_config = config.get("llm_model", {})
+    model_name = llm_config.get("name", "gemini-3.5-flash-lite")
 
-    cerebras_client = Cerebras(api_key=api_key)
+    # Try Google AI first, then Cerebras fallback
+    api_key = os.getenv("GOOGLE_API_KEY")
+    provider = "google"
+    client = None
+
+    if api_key and GENAI_AVAILABLE:
+        genai.configure(api_key=api_key)
+        client = genai.GenerativeModel(model_name)
+        logger.info(f"GET /api/sample - Using Google AI model: {model_name}")
+    else:
+        # Fallback to Cerebras
+        cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        if cerebras_key:
+            try:
+                from cerebras.cloud.sdk import Cerebras
+                client = Cerebras(api_key=cerebras_key)
+                model_name = "gpt-oss-120b"
+                provider = "cerebras"
+                logger.info("GET /api/sample - Google AI not configured, using Cerebras fallback")
+            except ImportError:
+                pass
+
+    if not client:
+        logger.warning("GET /api/sample - No LLM API key set (GOOGLE_API_KEY or CEREBRAS_API_KEY)")
+        raise HTTPException(status_code=500, detail="No LLM API key configured (GOOGLE_API_KEY or CEREBRAS_API_KEY)")
 
     num_chunks = (count + CHUNK_SIZE - 1) // CHUNK_SIZE
     all_texts: list[str] = []
@@ -332,7 +381,12 @@ async def get_sample_texts(
                 )
             )
             def fetch_with_retry():
-                return _fetch_chunk(cerebras_client, chunk_idx, texts_in_chunk)
+                if provider == "google":
+                    return _fetch_chunk_google(client, model_name, texts_in_chunk)
+                else:
+                    # Cerebras fallback
+                    from cerebras.cloud.sdk import Cerebras, RateLimitError as CerebrasRateLimitError
+                    return _fetch_chunk_cerebras(client, texts_in_chunk)
 
             chunk_texts = fetch_with_retry()
             all_texts.extend(chunk_texts)
@@ -344,14 +398,11 @@ async def get_sample_texts(
 
         except Exception as e:
             if not _is_retryable_error(e):
-                # Non-retryable error (e.g., JSON parse, validation) — fail immediately
                 logger.error(f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} non-retryable error: {type(e).__name__}: {e}")
-                raise HTTPException(status_code=500, detail=f"Cerebras API error: {type(e).__name__}: {str(e)}")
-            # Retry exhausted — record failure
+                raise HTTPException(status_code=500, detail=f"LLM API error ({provider}): {type(e).__name__}: {str(e)}")
             logger.error(f"GET /api/sample - chunk {chunk_idx+1}/{num_chunks} failed after 3 retries: {type(e).__name__}: {e}")
             failed_chunks.append(chunk_idx + 1)
 
-        # Early exit if we already have enough texts
         if len(all_texts) >= count:
             break
 
@@ -363,6 +414,43 @@ async def get_sample_texts(
 
     result_texts = all_texts[:count]
     elapsed = time.time() - start_time
-    logger.info(f"GET /api/sample - Returning {len(result_texts)} texts in {elapsed:.1f}s via {num_chunks} chunks")
+    logger.info(f"GET /api/sample - Returning {len(result_texts)} texts in {elapsed:.1f}s via {num_chunks} chunks ({provider})")
 
     return SampleTextsResponse(texts=result_texts, count=len(result_texts))
+
+
+def _fetch_chunk_cerebras(client, chunk_size: int) -> list[str]:
+    """Fetch one chunk of sample texts from Cerebras."""
+    prompt = f"""Generate EXACTLY {chunk_size} diverse, short text snippets (each 10-20 words) for a text clustering demo.
+These MUST cover various topics like technology, business, health, science, entertainment, sports, politics, education, finance, etc.
+You MUST provide exactly {chunk_size} items in the array, no more and no less.
+
+Return them as a JSON object with a "texts" key containing an array of EXACTLY {chunk_size} strings:
+
+{{"texts": ["Text 1...", "Text 2...", "Text 3...", ...up to "Text {chunk_size}..."]}}
+
+Respond ONLY with valid JSON containing exactly {chunk_size} texts:"""
+
+    response = client.chat.completions.create(
+        model="gpt-oss-120b",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that generates sample text data. Respond ONLY with valid JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7,
+        max_tokens=8192
+    )
+
+    raw_content = response.choices[0].message.content
+    if raw_content is None:
+        reasoning = response.choices[0].message.reasoning
+        if reasoning:
+            raw_content = _extract_json_from_text(reasoning)
+
+    if raw_content is None:
+        raise ValueError("Cerebras returned empty response")
+
+    result_text = raw_content.strip()
+    data = json.loads(result_text)
+    texts = data.get("texts", [])
+    return texts

@@ -42,36 +42,27 @@ In short, this tool bridges **qualitative LLM outputs** and **quantitative busin
 
 ## Architecture
 
+**Single-container deployment**: The React frontend is built and served directly by the FastAPI backend on port 5000. All static assets (`/`, `/cluster`, etc.) are served from the backend, while API routes (`/api/*`) handle clustering logic.
+
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'primaryTextColor': '#e6edf3', 'lineColor': '#8b949e' }} }%%
 flowchart TB
-    subgraph Frontend["Frontend (React) - Port 3000"]
-        A[Input Panel] -->|User Input| B[Redux Store]
-        C[Cluster Chart] -->|Visualization| B
-        D[Properties Panel] -->|Cluster Details| B
+    subgraph App["App Container (FastAPI + React) - Port 5000"]
+        A[Static Files<br/>React Build] --> B[FastAPI Backend]
+        B --> C["API Routes<br/>/api/cluster, /api/sample, /health"]
+        C --> D[Embedder Service]
+        C --> E[Clusterer Service]
+        C --> F[Namer Service]
+
+        D -->|BGE-m3| G[1024-dim Vectors]
+        E -->|K-Means or HDBSCAN| H[Cluster Labels]
+        F -->|Cerebras AI| I[Cluster Names]
     end
 
-    B -->|HTTP /api/*| E
-
-    subgraph Backend["Backend (FastAPI) - Port 5000"]
-        E[API Routes] --> F["/api/cluster"]
-        E --> G["/api/sample"]
-        E --> H["/health"]
-
-        F --> I[Embedder Service]
-        F --> J[Clusterer Service]
-        F --> K[Namer Service]
-
-        I -->|BGE-m3| L[1024-dim Vectors]
-        J -->|K-Means or HDBSCAN| M[Cluster Labels]
-        K -->|Cerebras AI| N[Cluster Names]
-    end
-
-    style Frontend fill:#1f3a5f,stroke:#58a6ff,color:#e6edf3
-    style Backend fill:#3d2e1f,stroke:#d29922,color:#e6edf3
-    style I fill:#1f4a32,stroke:#7ee787,color:#e6edf3
-    style J fill:#1f4a32,stroke:#7ee787,color:#e6edf3
-    style K fill:#1f4a32,stroke:#7ee787,color:#e6edf3
+    style App fill:#1f3a5f,stroke:#58a6ff,color:#e6edf3
+    style D fill:#1f4a32,stroke:#7ee787,color:#e6edf3
+    style E fill:#1f4a32,stroke:#7ee787,color:#e6edf3
+    style F fill:#1f4a32,stroke:#7ee787,color:#e6edf3
 ```
 
 ### Data Flow
@@ -87,7 +78,7 @@ flowchart LR
     F --> G["2D<br/>Coordinates"]
     G --> H["4. Normalization<br/>MinMaxScaler"]
     H --> I["[0, 1]<br/>Normalized"]
-    I --> J["5. Cluster Naming<br/>Groq AI"]
+    I --> J["5. Cluster Naming<br/>Google Gemini AI"]
     J --> K["Descriptive<br/>Names"]
     K --> L["Visualization<br/>Data"]
 
@@ -115,7 +106,7 @@ flowchart LR
 | **scikit-learn** | 1.4.0 | K-Means clustering, silhouette scoring |
 | **UMAP** | 0.5.5 | Dimensionality reduction |
 | **HDBSCAN** | 0.8.1 | Density-based clustering |
-| **Cerebras SDK** | Latest | AI-powered cluster naming |
+| **Google Generative AI** | 0.8.5 | AI-powered cluster naming |
 | **NumPy** | 1.26.3 | Numerical computations |
 | **Pandas** | 2.2.0 | Data manipulation |
 
@@ -136,9 +127,9 @@ flowchart LR
 | Technology | Purpose |
 |------------|---------|
 | **Docker** | Containerization |
-| **Docker Compose** | Multi-container orchestration |
+| **Docker Compose** | Single-container orchestration |
 | **Micromamba** | Fast conda environment management |
-| **Node.js** | Frontend runtime (Alpine) |
+| **Node.js** | Frontend build (bundled in backend container) |
 
 ---
 
@@ -246,9 +237,9 @@ flowchart LR
     style Config fill:#2d333b,stroke:#8b949e,color:#e6edf3
 ```
 
-### 5. Cluster Naming (Cerebras AI)
+### 5. Cluster Naming (Google Gemini AI)
 
-**Model**: `gpt-oss-120b` via Cerebras API
+**Model**: `gemini-3.5-flash-lite` via Google AI (configurable in `backend/config.json`)
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'lineColor': '#8b949e', 'tertiaryColor': '#d29922', 'noteBkgColor': '#2d333b', 'noteTextColor': '#e6edf3' }} }%%
@@ -261,9 +252,9 @@ sequenceDiagram
     Note over Cerebras: Prompt: "You are a data analyst...<br/>Samples: text1, text2..."
     Cerebras-->>BE: Response with<br/>cluster name
     BE->>BE: Extract name from<br/>response
-    alt Cerebras Available
+    alt LLM Available
         BE->>BE: Use AI-generated name
-    else Cerebras Unavailable
+    else LLM Unavailable
         BE->>BE: Fallback to "Cluster 1, 2, 3..."
     end
 ```
@@ -274,30 +265,31 @@ sequenceDiagram
 
 ```
 natural_language_clustering/
-├── docker-compose.yml           # Docker orchestration
+├── docker-compose.yml           # Docker orchestration (single container)
 ├── README.md                   # This file
 ├── AGENTS.md                   # Agent instructions
 │
 ├── backend/
-│   ├── Dockerfile              # Backend container definition
+│   ├── Dockerfile              # Backend container (builds + serves frontend)
+│   ├── config.json            # Model configuration (embedding + LLM)
 │   ├── requirements.txt        # Python dependencies
-│   ├── .env                   # Environment variables (CEREBRAS_API_KEY)
+│   ├── .env                   # Environment variables (GOOGLE_API_KEY)
 │   └── app/
-│       ├── main.py            # FastAPI app initialization
+│       ├── main.py            # FastAPI app + static file serving
+│       ├── static/            # Built React frontend (generated at build time)
 │       ├── models/
 │       │   └── schemas.py     # Pydantic request/response models
 │       ├── routes/
-│       │   └── cluster.py      # API endpoints
+│       │   └── cluster.py     # API endpoints
 │       └── services/
 │           ├── embedder.py     # BGE-m3 embedding service
 │           ├── clusterer.py    # K-Means/HDBSCAN + UMAP
 │           └── namer.py        # Cerebras AI cluster naming
 │
 └── frontend/
-    ├── Dockerfile             # Frontend container definition
     ├── package.json           # Node dependencies
-    ├── pnpm-workspace.yaml    # pnpm workspace config
-    ├── vite.config.js        # Vite config with API proxy
+    ├── pnpm-lock.yaml        # pnpm lock file
+    ├── vite.config.js        # Vite config
     ├── tailwind.config.js    # Tailwind CSS config
     ├── index.html             # HTML entry point
     └── src/
@@ -322,55 +314,40 @@ natural_language_clustering/
 
 ## Configuration
 
-### Docker Compose Architecture
+### Single Container Architecture
+
+The frontend is built during the Docker image build and served as static files by FastAPI.
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#58a6ff', 'lineColor': '#8b949e', 'tertiaryColor': '#d29922' }} }%%
 flowchart LR
     subgraph DockerHost["Docker Host"]
-        subgraph BackendContainer["backend container"]
-            B[FastAPI<br/>Port 5000] --> C[HuggingFace<br/>Cache Volume]
-        end
-
-        subgraph FrontendContainer["frontend container"]
-            F[React/Vite<br/>Port 3000] -->|Proxy /api| B
+        subgraph AppContainer["app container (FastAPI + React)"]
+            B[FastAPI<br/>Port 5000<br/>Serves React build] --> C[HuggingFace<br/>Cache Volume]
+            B --> D[Static Files<br/>/app/app/static]
         end
     end
 
-    User([User Browser]) -->|Port 3000| F
-    User -->|Port 5000| B
+    User([User Browser]) -->|Port 5000| B
 
     C -.->|Persist models| HV[HuggingFace<br/>Cache Volume]
 
     style DockerHost fill:#161b22,stroke:#30363d,color:#e6edf3
-    style BackendContainer fill:#3d2e1f,stroke:#d29922,color:#e6edf3
-    style FrontendContainer fill:#1f3a5f,stroke:#58a6ff,color:#e6edf3
+    style AppContainer fill:#1f3a5f,stroke:#58a6ff,color:#e6edf3
     style HV fill:#2d333b,stroke:#8b949e,color:#e6edf3
 ```
 
-### Docker Compose Services
-
-#### Backend Service
+### App Service
 
 | Setting | Value | Description |
 |---------|-------|-------------|
-| Image | Built from `./backend` | Custom Dockerfile |
-| Container Name | `backend` | Docker container name |
+| Build Context | `.` | Root project directory |
+| Dockerfile | `backend/Dockerfile` | Multi-stage build (Python + Node.js) |
+| Container Name | `app` | Docker container name |
 | Port | `5000:5000` | Host:Container port mapping |
 | Environment File | `./backend/.env` | CEREBRAS_API_KEY |
-| Volume | `backend-huggingface-cache:/root/.cache/huggingface` | Model cache persistence |
+| Volume | `backend-huggingface-cache:/home/mambauser/.cache/huggingface` | Model cache persistence |
 | Health Check | `GET /health` | Container health verification |
-| Dependencies | None | Starts independently |
-
-#### Frontend Service
-
-| Setting | Value | Description |
-|---------|-------|-------------|
-| Image | Built from `./frontend` | Custom Dockerfile |
-| Container Name | `frontend` | Docker container name |
-| Port | `3000:3000` | Host:Container port mapping |
-| Environment | `VITE_API_URL=http://backend:5000` | API endpoint for container-to-container |
-| Dependencies | `backend` | Ensures backend starts first |
 
 ### Docker Volumes
 
@@ -385,17 +362,28 @@ flowchart LR
 #### Backend (.env)
 
 ```bash
-# Required
-CEREBRAS_API_KEY=your_cerebras_api_key_here
+# Required - Get from https://console.cerebras.ai (or Google AI from https://aistudio.google.com)
+GOOGLE_API_KEY=your_google_api_key_here
 
 # Optional
 PRELOAD_EMBEDDING_MODEL=false  # Set to true to load model at container start
 ```
 
-#### Frontend (docker-compose.yml)
+#### Backend (config.json)
 
-```bash
-VITE_API_URL=http://backend:5000  # Internal Docker network URL
+Model configuration is in `backend/config.json`:
+
+```json
+{
+  "embedding_model": {
+    "name": "BAAI/bge-m3"
+  },
+  "llm_model": {
+    "provider": "google",
+    "name": "gemini-3.5-flash-lite",
+    "fallback_name": "gemini-3.5-flash-lite"
+  }
+}
 ```
 
 ---
@@ -406,7 +394,7 @@ VITE_API_URL=http://backend:5000  # Internal Docker network URL
 
 1. **Docker** installed (version 20.10+)
 2. **Docker Compose** installed (version 2.0+)
-3. **Cerebras API Key** from [console.cerebras.ai](https://console.cerebras.ai)
+3. **Google AI API Key** from [aistudio.google.com](https://aistudio.google.com) (or Cerebras from [console.cerebras.ai](https://console.cerebras.ai))
 
 ### Quick Start
 
@@ -424,14 +412,14 @@ Edit `backend/.env`:
 CEREBRAS_API_KEY=your_actual_cerebras_api_key_here
 ```
 
-**Step 3: Build and start containers**
+**Step 3: Build and start the container**
 
 ```bash
 docker compose build --no-cache
 docker compose up -d
 ```
 
-**Step 4: Verify services**
+**Step 4: Verify the service**
 
 ```bash
 # Check container status
@@ -442,27 +430,23 @@ docker compose logs -f
 
 # Health check
 curl http://localhost:5000/health
-curl http://localhost:3000
 ```
 
 **Step 5: Access the application**
 
-Open your browser to: **http://localhost:3000**
+Open your browser to: **http://localhost:5000**
 
 ### Docker Compose Commands
 
 | Command | Description |
 |---------|-------------|
-| `docker compose up -d` | Start containers in detached mode |
-| `docker compose down` | Stop and remove containers |
-| `docker compose logs -f` | Follow logs from all services |
-| `docker compose logs -f backend` | Follow backend logs only |
-| `docker compose restart` | Restart all services |
-| `docker compose restart backend` | Restart backend only |
+| `docker compose up -d` | Start container in detached mode |
+| `docker compose down` | Stop and remove container |
+| `docker compose logs -f` | Follow logs |
+| `docker compose logs -f` | Follow app logs |
+| `docker compose restart` | Restart the container |
 | `docker compose build --no-cache` | Rebuild without cache |
-| `docker compose build backend` | Rebuild backend only |
-| `docker compose exec backend sh` | Shell into backend container |
-| `docker compose exec frontend sh` | Shell into frontend container |
+| `docker compose exec app sh` | Shell into app container |
 | `docker compose ps` | Show container status |
 | `docker compose top` | Show running processes |
 
@@ -472,8 +456,7 @@ Open your browser to: **http://localhost:3000**
 
 ```bash
 # Check logs
-docker compose logs backend
-docker compose logs frontend
+docker compose logs
 
 # Verify .env exists
 cat backend/.env
@@ -490,18 +473,17 @@ ARG PRELOAD_EMBEDDING_MODEL=true
 
 Or manually trigger download:
 ```bash
-docker compose exec backend python -c "from app.services.embedder import get_embedder; get_embedder()"
+docker compose exec app python -c "from app.services.embedder import embedder; embedder.load_model()"
 ```
 
 #### Port conflicts
 
-If ports 3000 or 5000 are in use:
+If port 5000 is in use:
 
 ```yaml
 # In docker-compose.yml, change:
 ports:
-  - "3001:3000"  # Frontend now on 3001
-  - "5001:5000"  # Backend now on 5001
+  - "5001:5000"  # App now on 5001
 ```
 
 #### Out of memory
@@ -543,7 +525,7 @@ export CEREBRAS_API_KEY=your_api_key
 uvicorn app.main:app --reload --port 5000
 ```
 
-**Frontend:**
+**Frontend (for live reload):**
 
 ```bash
 cd frontend

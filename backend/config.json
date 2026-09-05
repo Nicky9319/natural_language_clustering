@@ -1,0 +1,15 @@
+{
+  "embedding_model": {
+    "provider": "google",
+    "name": "gemini-embedding-001",
+    "fallback_name": "BAAI/bge-m3",
+    "normalize_embeddings": true
+  },
+  "llm_model": {
+    "provider": "google",
+    "name": "gemini-3.5-flash-lite",
+    "fallback_name": "gemini-3.5-flash-lite",
+    "temperature": 0.3,
+    "max_tokens": 2048
+  }
+}

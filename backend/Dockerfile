@@ -35,7 +35,7 @@ ENV PATH=/opt/conda/bin:$PATH \
 
 # Keep image rebuilds fast by default. Enable this only when you explicitly want
 # the large embedding model baked into the image:
-# docker compose build --build-arg PRELOAD_MODEL=true backend
+# docker compose build --build-arg PRELOAD_MODEL=true app
 ARG PRELOAD_MODEL=false
 ARG EMBEDDING_MODEL=BAAI/bge-m3
 RUN --mount=type=cache,target=/home/$MAMBA_USER/.cache/huggingface,uid=57439,gid=57439 \

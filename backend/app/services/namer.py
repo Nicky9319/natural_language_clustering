@@ -1,41 +1,42 @@
 import os
 import re
 import json
-from cerebras.cloud.sdk import Cerebras
 import logging
 from typing import Optional
+
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
 
 
 logger = logging.getLogger("cluster_namer")
 
+# Default config
+DEFAULT_LLM_MODEL = "gemini-2.0-flash"
+DEFAULT_LLM_FALLBACK = "gemini-1.5-flash"
+
+
+def _load_config() -> dict:
+    """Load config from config.json if present."""
+    # namer.py is at /app/app/services/namer.py
+    # config.json is at /app/config.json (three levels up)
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"[NAMER] Failed to load config.json: {e}")
+    return {}
+
 
 def _extract_json_from_text(text: str) -> str | None:
-    """Extract JSON object from text by finding {"texts": or last {...} block."""
-    # Try to find ```json ... ``` code block first (greedy to capture outermost braces)
+    """Extract JSON object from text by finding ```json ... ``` or last {...} block."""
     json_match = re.search(r'```json\s*(\{[\s\S]*\})\s*```', text)
     if json_match:
         return json_match.group(1)
-    # Try to find {"texts": ...} pattern
-    texts_marker = re.search(r'["\']texts["\']\s*:\s*\[', text)
-    if texts_marker:
-        search_start = max(0, texts_marker.start() - 200)
-        search_region = text[search_start:texts_marker.end()]
-        brace_pos = -1
-        for i, c in enumerate(search_region):
-            if c == '{':
-                brace_pos = i
-        if brace_pos >= 0:
-            start = search_start + brace_pos
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == '{':
-                    depth += 1
-                elif text[i] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i+1]
-    # Last resort: find the FIRST { that eventually closes at depth 0.
-    # This captures the outermost JSON object even when inner objects share the same line.
     for i, c in enumerate(text):
         if c == '{':
             depth = 0
@@ -51,27 +52,62 @@ def _extract_json_from_text(text: str) -> str | None:
 
 class ClusterNamer:
     def __init__(self):
-        self.cerebras_client = None
-        api_key = os.getenv("CEREBRAS_API_KEY")
-        if api_key:
-            self.cerebras_client = Cerebras(api_key=api_key)
-            logger.info("Cerebras client initialized for cluster naming")
+        self.client = None
+        self.model_name = None
+
+        # Load config
+        config = _load_config()
+        llm_config = config.get("llm_model", {})
+        self.model_name = llm_config.get("name", DEFAULT_LLM_MODEL)
+        fallback = llm_config.get("fallback_name", DEFAULT_LLM_FALLBACK)
+        temperature = llm_config.get("temperature", 0.3)
+        max_tokens = llm_config.get("max_tokens", 2048)
+
+        # Try to initialize Google AI
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            # Fallback to Cerebras if no Google API key
+            api_key = os.getenv("CEREBRAS_API_KEY")
+            provider = "cerebras"
         else:
-            logger.warning("Cerebras client not initialized - CEREBRAS_API_KEY not set")
+            provider = "google"
+
+        if api_key and GENAI_AVAILABLE:
+            if provider == "google":
+                genai.configure(api_key=api_key)
+                self.client = genai.GenerativeModel(self.model_name)
+                self._provider = "google"
+                logger.info(f"[NAMER] Google AI client initialized with model: {self.model_name}")
+            else:
+                # Fallback to Cerebras
+                try:
+                    from cerebras.cloud.sdk import Cerebras
+                    self.client = Cerebras(api_key=api_key)
+                    self.model_name = "gpt-oss-120b"
+                    self._provider = "cerebras"
+                    logger.info("[NAMER] Google AI not configured, using Cerebras fallback")
+                except ImportError:
+                    logger.warning("[NAMER] Cerebras SDK not installed")
+                    self._provider = None
+        else:
+            if not api_key:
+                logger.warning("[NAMER] No LLM API key set (GOOGLE_API_KEY or CEREBRAS_API_KEY)")
+            if not GENAI_AVAILABLE:
+                logger.warning("[NAMER] Google AI SDK (google-generativeai) not installed")
+            self._provider = None
 
     def is_available(self) -> bool:
-        return self.cerebras_client is not None
+        return self.client is not None
 
     def name_clusters(self, cluster_texts: dict[int, list[str]]) -> dict[int, dict[str, str]]:
-        """Generate names and descriptions for all clusters using Cerebras."""
-        logger.info(f"[NAMER] Starting cluster naming process for {len(cluster_texts)} clusters")
+        """Generate names and descriptions for all clusters using LLM."""
+        logger.info(f"[NAMER] Starting cluster naming process for {len(cluster_texts)} clusters (provider: {self._provider})")
 
         if not self.is_available():
-            logger.warning("[NAMER] Cerebras not available - using generic cluster names")
+            logger.warning("[NAMER] No LLM available - using generic cluster names")
             return {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
 
         try:
-            # Build a single prompt for all clusters
             prompt_parts = []
             for cluster_id, texts in cluster_texts.items():
                 texts_sample = "\n".join(f"- {t[:100]}" for t in texts[:5])
@@ -87,47 +123,45 @@ Respond with a JSON object mapping cluster numbers to an object with "name" and 
 
 JSON:"""
 
-            logger.info(f"[NAMER] Sending request to Cerebras API for {len(cluster_texts)} clusters")
-            logger.debug(f"[NAMER] Prompt preview: {full_prompt[:500]}...")
+            logger.info(f"[NAMER] Sending request to {self._provider.upper()} API ({self.model_name}) for {len(cluster_texts)} clusters")
 
-            response = self.cerebras_client.chat.completions.create(
-                model="gpt-oss-120b",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant that names clusters. Respond ONLY with valid JSON."
-                    },
-                    {
-                        "role": "user",
-                        "content": full_prompt
+            if self._provider == "google":
+                response = self.client.generate_content(
+                    full_prompt,
+                    generation_config={
+                        "temperature": 0.3,
+                        "max_output_tokens": 2048,
                     }
-                ],
-                temperature=0.3,
-                max_tokens=8192
-            )
+                )
+                result_text = response.text.strip()
+            else:
+                # Cerebras fallback
+                from cerebras.cloud.sdk import Cerebras, RateLimitError as CerebrasRateLimitError
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that names clusters. Respond ONLY with valid JSON."},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=8192
+                )
+                raw_content = response.choices[0].message.content
+                if raw_content is None:
+                    reasoning = response.choices[0].message.reasoning
+                    if reasoning:
+                        raw_content = _extract_json_from_text(reasoning)
+                result_text = (raw_content or "").strip()
 
-            raw_content = response.choices[0].message.content
-            # Cerebras reasoning models put content in 'reasoning' field when content is None
-            if raw_content is None:
-                reasoning = response.choices[0].message.reasoning
-                logger.info(f"[NAMER] Using reasoning field content ({len(reasoning) if reasoning else 0} chars)")
-                if reasoning:
-                    raw_content = _extract_json_from_text(reasoning)
-                    logger.info(f"[NAMER] Extracted JSON: {len(raw_content) if raw_content else 0} chars")
+            logger.info(f"[NAMER] Received response from {self._provider.upper()} ({len(result_text)} chars)")
 
-            if raw_content is None:
-                logger.error(f"[NAMER] Cerebras returned None content. Full response: {response}")
-                return {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
-
-            result_text = raw_content.strip()
-            logger.info(f"[NAMER] Received response from Cerebras ({len(result_text)} chars)")
-            logger.debug(f"[NAMER] Raw response: {result_text[:1000]}")
-
-            # Try to parse JSON from response
+            # Parse JSON from response
             try:
-                names = json.loads(result_text)
+                # Try to extract JSON if wrapped in markdown
+                json_text = _extract_json_from_text(result_text) or result_text
+                names = json.loads(json_text)
                 logger.info(f"[NAMER] Successfully parsed JSON with {len(names)} cluster names")
-                # Convert string keys to int and ensure all clusters have names + descriptions
+
                 result = {}
                 for k, v in names.items():
                     cluster_id = int(k) - 1
@@ -136,20 +170,16 @@ JSON:"""
                             "name": v.get("name", f"Cluster {cluster_id + 1}"),
                             "description": v.get("description")
                         }
-                        logger.debug(f"[NAMER] Cluster {cluster_id}: name='{result[cluster_id]['name']}', description='{result[cluster_id]['description']}'")
                     else:
-                        # Handle case where LLM returns just a string
-                        result[cluster_id] = {"name": v, "description": None}
-                        logger.warning(f"[NAMER] Cluster {cluster_id} returned string instead of object, using as name only")
+                        result[cluster_id] = {"name": str(v), "description": None}
                 logger.info(f"[NAMER] Final naming result: {result}")
                 return result
             except json.JSONDecodeError as e:
                 logger.error(f"[NAMER] JSON parse error: {e}")
-                logger.debug(f"[NAMER] Failed response was: {result_text[:500]}")
                 return {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
 
         except Exception as e:
-            logger.error(f"[NAMER] Cerebras naming failed: {type(e).__name__}: {e}")
+            logger.error(f"[NAMER] Naming failed ({self._provider}): {type(e).__name__}: {e}")
             return {i: {"name": f"Cluster {i+1}", "description": None} for i in cluster_texts.keys()}
 
 
